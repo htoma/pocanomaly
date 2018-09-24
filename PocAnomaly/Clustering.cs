@@ -62,14 +62,14 @@ namespace PocAnomaly
 
             var scoreRequest = new
             {
-                Inputs = new global::System.Collections.Generic.Dictionary<string, global::System.Collections.Generic.List<global::System.Collections.Generic.Dictionary<string, string>>>
+                Inputs = new Dictionary<string, List<Dictionary<string, string>>>
                         {
                             {
                                 "input1",
                                 points
                             },
                         },
-                GlobalParameters = new global::System.Collections.Generic.Dictionary<string, string>
+                GlobalParameters = new Dictionary<string, string>
                         {
                             {
                                 "Range for Number of Centroids",
