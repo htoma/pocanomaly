@@ -10,12 +10,64 @@ using System.Text;
 using System.Linq;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
+using System.Diagnostics;
+using System.Threading;
 
 namespace PocAnomaly
 {
     using System;
     using System.Configuration;
     using System.Net.Http.Headers;
+
+    public class AzureBlobDataReference
+    {
+        // Storage connection string used for regular blobs. It has the following format:
+        // DefaultEndpointsProtocol=https;AccountName=ACCOUNT_NAME;AccountKey=ACCOUNT_KEY
+        // It's not used for shared access signature blobs.
+        public string ConnectionString { get; set; }
+
+        // Relative uri for the blob, used for regular blobs as well as shared access
+        // signature blobs.
+        public string RelativeLocation { get; set; }
+
+        // Base url, only used for shared access signature blobs.
+        public string BaseLocation { get; set; }
+
+        // Shared access signature, only used for shared access signature blobs.
+        public string SasBlobToken { get; set; }
+    }
+
+    public enum BatchScoreStatusCode
+    {
+        NotStarted,
+        Running,
+        Failed,
+        Cancelled,
+        Finished
+    }
+
+    public class BatchScoreStatus
+    {
+        // Status code for the batch scoring job
+        public BatchScoreStatusCode StatusCode { get; set; }
+
+        // Locations for the potential multiple batch scoring outputs
+        public IDictionary<string, AzureBlobDataReference> Results { get; set; }
+
+        // Error details, if any
+        public string Details { get; set; }
+    }
+
+    public class BatchExecutionRequest
+    {
+        public IDictionary<string, AzureBlobDataReference> Inputs { get; set; }
+
+        public IDictionary<string, string> GlobalParameters { get; set; }
+
+        // Locations for the potential multiple batch scoring outputs
+        public IDictionary<string, AzureBlobDataReference> Outputs { get; set; }
+    }
+
 
     public static class Clustering
     {
@@ -109,11 +161,12 @@ namespace PocAnomaly
             CloudStorageAccount account = CloudStorageAccount.Parse(storageConnectionString);
             CloudBlobClient serviceClient = account.CreateCloudBlobClient();
 
-            return serviceClient.GetContainerReference("mlstudio2");
+            return serviceClient.GetContainerReference("mlstudio3");
         }
 
-        static private void AnalyzeResult(ref string[] result)
+        static private void AnalyzeResult(string text)
         {
+            string[] result = text.Split(new string[] { Environment.NewLine }, StringSplitOptions.None);
             int linesCount = result.Length - 1;
             int biggestCluster = 0;
             var map = BuildClusterMap(ref result, ref biggestCluster);
@@ -141,70 +194,115 @@ namespace PocAnomaly
         public static async Task<HttpResponseMessage> Run(
             [HttpTrigger(AuthorizationLevel.Function, "post", Route = null)]
             HttpRequestMessage req,
-            [Blob("mlstudio2/data.csv", FileAccess.Read, Connection = "BlobContainerConnection")] Stream data,
             TraceWriter log)
         {
-            var (status, result) = await ClusterOnMlStudio(data);
+            string inputBlob = req.GetQueryNameValuePairs()
+                .FirstOrDefault(q => string.Compare(q.Key, "blob", true) == 0)
+                .Value;
+
+            var (status, result) = await ClusterOnMlStudio(inputBlob);
             return req.CreateResponse(status, result);
         }
 
-        static async Task<(HttpStatusCode, string)> ClusterOnMlStudio(Stream data)
+        static async Task<(HttpStatusCode, string)> ClusterOnMlStudio(string inputBlob)
         {
-            int linesCount = 0;
-            string input = "data\n";
-
-            using (StreamReader reader = new StreamReader(data, Encoding.UTF8))
-            {
-                string line;
-                while ((line = await reader.ReadLineAsync()) != null)
-                {
-                    if (linesCount != 0 && linesCount % 1000 == 0)
-                    {
-                        Console.WriteLine(linesCount);
-                        if (linesCount % 2000 == 0)
-                        {
-                            break;
-                        }
-                    }
-                    input += line.Replace(',', '|');
-                    input += "\n";
-                    ++linesCount;
-                }
-            }
-
             CloudBlobContainer container = GetContainer();
-            CloudBlockBlob inputBlob = container.GetBlockBlobReference("input.csv");
-            inputBlob.UploadText(input);
 
-            var scoreRequest = new
+            const string BaseUrl = "https://ussouthcentral.services.azureml.net/workspaces/4d8204d6de264979998f91e6ef9bb0fe/services/e8f250ba3b224273a0edddb9d89f7099/jobs";
+
+            const string apiKey = "xzxTmgU9og9am7kT/GzLxsmsZrBxYFTINi0F44iH3uZwAncoEvEKeUPD7S4epkPO+8Yxwy4bqFGyzE4Y9QVVrw==";
+
+            const int TimeOutInMilliseconds = 3600 * 1000; // Set a timeout of 1h
+
+            using (HttpClient client = new HttpClient())
             {
-                Inputs = new Dictionary<string, List<Dictionary<string, string>>>()
-                { },
-                GlobalParameters = new Dictionary<string, string>()
-                { }
-            };
-
-            var response = await Client.PostAsJsonAsync("", scoreRequest);
-            string responseContent = "";
-
-            if (response.IsSuccessStatusCode)
-            {
-                CloudBlockBlob blob = container.GetBlockBlobReference("output.csv");
-                using (var memoryStream = new MemoryStream())
+                var request = new BatchExecutionRequest()
                 {
-                    blob.DownloadToStream(memoryStream);
-                    string text = Encoding.ASCII.GetString(memoryStream.ToArray());
-                    string[] result = text.Split(new string[] { Environment.NewLine }, StringSplitOptions.None);
-                    AnalyzeResult(ref result);
-                }
-                responseContent = "OK";
-            }
-            else
-            {
-                responseContent = await response.Content.ReadAsStringAsync();
-            }
+                    GlobalParameters = new Dictionary<string, string>()
+                    {
+                       {
+                            "Path to container, directory or blob", inputBlob
+                        },
+                    }
+                };
 
-            return (response.StatusCode, responseContent);
+                client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+
+                Console.WriteLine("Submitting the job...");
+
+                // submit the job
+                var response = await client.PostAsJsonAsync(BaseUrl + "?api-version=2.0", request);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return (response.StatusCode, await response.Content.ReadAsStringAsync());
+                }
+
+                string jobId = await response.Content.ReadAsAsync<string>();
+                Console.WriteLine(string.Format("Job ID: {0}", jobId));
+
+                // start the job
+                Console.WriteLine("Starting the job...");
+                response = await client.PostAsync(BaseUrl + "/" + jobId + "/start?api-version=2.0", null);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return (response.StatusCode, await response.Content.ReadAsStringAsync());
+                }
+
+                string jobLocation = BaseUrl + "/" + jobId + "?api-version=2.0";
+                Stopwatch watch = Stopwatch.StartNew();
+                bool done = false;
+                while (!done)
+                {
+                    Console.WriteLine("Checking the job status...");
+                    response = await client.GetAsync(jobLocation);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        return (response.StatusCode, await response.Content.ReadAsStringAsync());
+                    }
+
+                    BatchScoreStatus status = await response.Content.ReadAsAsync<BatchScoreStatus>();
+                    if (watch.ElapsedMilliseconds > TimeOutInMilliseconds)
+                    {
+                        done = true;
+                        Console.WriteLine(string.Format("Timed out. Deleting job {0} ...", jobId));
+                        await client.DeleteAsync(jobLocation);
+                    }
+                    switch (status.StatusCode)
+                    {
+                        case BatchScoreStatusCode.NotStarted:
+                            Console.WriteLine(string.Format("Job {0} not yet started...", jobId));
+                            break;
+                        case BatchScoreStatusCode.Running:
+                            Console.WriteLine(string.Format("Job {0} running...", jobId));
+                            break;
+                        case BatchScoreStatusCode.Failed:
+                            Console.WriteLine(string.Format("Job {0} failed!", jobId));
+                            Console.WriteLine(string.Format("Error details: {0}", status.Details));
+                            return (response.StatusCode, await response.Content.ReadAsStringAsync());
+                        case BatchScoreStatusCode.Cancelled:
+                            Console.WriteLine(string.Format("Job {0} cancelled!", jobId));
+                            return (response.StatusCode, await response.Content.ReadAsStringAsync());
+                        case BatchScoreStatusCode.Finished:
+                            done = true;
+                            Console.WriteLine(string.Format("Job {0} finished!", jobId));
+                            Console.WriteLine("Done ");
+                            CloudBlockBlob blob = container.GetBlockBlobReference("output.csv");
+                            using (var memoryStream = new MemoryStream())
+                            {
+                                blob.DownloadToStream(memoryStream);
+                                AnalyzeResult(Encoding.ASCII.GetString(memoryStream.ToArray()));
+                            }
+                            break;
+                    }
+
+                    if (!done)
+                    {
+                        Thread.Sleep(1000); // Wait one second
+                    }
+                }
+                return (HttpStatusCode.OK, "OK");
+            }
         }
     }
 }
