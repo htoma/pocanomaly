@@ -71,16 +71,6 @@ namespace PocAnomaly
 
     public static class Clustering
     {
-        private static HttpClient GetHttpClient()
-        {
-            var client = new HttpClient();
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-                "Bearer",
-                ConfigurationManager.AppSettings["MlStudioApiKey"]);
-            client.BaseAddress = new Uri(ConfigurationManager.AppSettings["MlStudioApiUrl"]);
-            return client;
-        }
-
         class Point
         {
             public Point()
