@@ -71,17 +71,7 @@ namespace PocAnomaly
 
     public static class Clustering
     {
-        private static readonly HttpClient Client = GetHttpClient();
 
-        private static HttpClient GetHttpClient()
-        {
-            var client = new HttpClient();
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-                "Bearer",
-                ConfigurationManager.AppSettings["MlStudioApiKey"]);
-            client.BaseAddress = new Uri(ConfigurationManager.AppSettings["MlStudioApiUrl"]);
-            return client;
-        }
 
         class Point
         {
@@ -209,7 +199,6 @@ namespace PocAnomaly
             CloudBlobContainer container = GetContainer();
 
             const string BaseUrl = "https://ussouthcentral.services.azureml.net/workspaces/4d8204d6de264979998f91e6ef9bb0fe/services/e8f250ba3b224273a0edddb9d89f7099/jobs";
-
             const string apiKey = "xzxTmgU9og9am7kT/GzLxsmsZrBxYFTINi0F44iH3uZwAncoEvEKeUPD7S4epkPO+8Yxwy4bqFGyzE4Y9QVVrw==";
 
             const int TimeOutInMilliseconds = 3600 * 1000; // Set a timeout of 1h
