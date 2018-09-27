@@ -7,13 +7,12 @@ using Microsoft.Azure.WebJobs.Host;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System;
+using System.Configuration;
+using System.Net.Http.Headers;
 
 namespace PocAnomaly
 {
-    using System;
-    using System.Configuration;
-    using System.Net.Http.Headers;
-
     public static class Clustering
     {
         private static readonly HttpClient Client = GetHttpClient();
