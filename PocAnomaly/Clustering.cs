@@ -76,32 +76,43 @@ namespace PocAnomaly
             public Point()
             {
                 values = new Dictionary<string, string>();
-                distanceToCentroides = new Dictionary<string, double>();
+                distanceToCentroid = 0;
+                anomaly = false;
             }
             public Dictionary<string, string> values { get; set; }
-            public Dictionary<string, double> distanceToCentroides { get; set; }
+            public double distanceToCentroid { get; set; }
+            public bool anomaly { get; set; }
         }
         class Cluster
         {
             public Cluster(string id, Point point)
             {
                 clusterId = id;
-                anomaly = false;
                 elements = new List<Point> { point };
             }
 
             public string clusterId { get; set; }
-            public bool anomaly { get; set; }
             public List<Point> elements { get; set; }
+
+            public bool anomaly
+            {
+                set
+                {
+                    foreach (Point element in elements)
+                    {
+                        element.anomaly = true;
+                    }
+                }
+            }
         }
 
-        static private Dictionary<string, Cluster> BuildClusterMap(ref string[] result, ref int biggestCluster)
+        static private Dictionary<string, Cluster> BuildClusterMap(ref string[] result, ref int pointsCount)
         {
             bool firstLine = true;
             int clusterLabelIndex = 0;
             int lineElementsNb = 0;
             List<string> headers = new List<string>();
-
+            pointsCount = 0;
             var map = new Dictionary<string, Cluster>();
             foreach (string line in result)
             {
@@ -117,14 +128,13 @@ namespace PocAnomaly
                 else if (lineElementsNb == split.Count)
                 {
                     var point = new Point();
+                    int clusterId = Convert.ToInt32(split[clusterLabelIndex]);
+
                     for (int i = 0; i < clusterLabelIndex; ++i)
                     {
                         point.values[headers[i]] = split[i];
                     }
-                    for (int i = clusterLabelIndex + 1; i < lineElementsNb; ++i)
-                    {
-                        point.distanceToCentroides[headers[i]] = Convert.ToDouble(split[i]);
-                    }
+                    point.distanceToCentroid = Convert.ToDouble(split[clusterLabelIndex + 1 + clusterId]);
                     if (map.ContainsKey(split[clusterLabelIndex]))
                     {
                         map[split[clusterLabelIndex]].elements.Add(point);
@@ -133,7 +143,7 @@ namespace PocAnomaly
                     {
                         map[split[clusterLabelIndex]] = new Cluster(split[clusterLabelIndex], point);
                     }
-                    biggestCluster = Math.Max(biggestCluster, map[split[clusterLabelIndex]].elements.Count);
+                    ++pointsCount;
                 }
             }
 
@@ -152,29 +162,26 @@ namespace PocAnomaly
             return serviceClient.GetContainerReference("mlstudio3");
         }
 
+
         static private void AnalyzeResult(string text)
         {
             string[] result = text.Split(new string[] { Environment.NewLine }, StringSplitOptions.None);
             int linesCount = result.Length - 1;
-            int biggestCluster = 0;
-            var map = BuildClusterMap(ref result, ref biggestCluster);
+            int pointsCount = 0;
+            var map = BuildClusterMap(ref result, ref pointsCount);
 
-            string output = "";
             foreach (KeyValuePair<string, Cluster> points in map)
             {
                 Cluster cluster = points.Value;
-                if (((double)cluster.elements.Count / (double)biggestCluster) < 0.1)
+                if (((double)cluster.elements.Count / (double)pointsCount) < 0.1)
                 {
                     cluster.anomaly = true;
                 }
-                double repartition = (double)cluster.elements.Count / (double)linesCount;
-                output += "Cluster : " + points.Key + ", repartition : "
-                        + repartition + " anomaly : " + (cluster.anomaly ? "yes" : "no") + "\n";
             }
-            
-            string jsonResult = Newtonsoft.Json.JsonConvert.SerializeObject(map.Select(elem => elem.Value).ToList());
+
             CloudBlobContainer container = GetContainer();
             CloudBlockBlob inputBlob = container.GetBlockBlobReference("result.json");
+            string jsonResult = Newtonsoft.Json.JsonConvert.SerializeObject(map.Select(elem => elem.Value).ToList());
             inputBlob.UploadText(jsonResult);
         }
 
@@ -215,8 +222,6 @@ namespace PocAnomaly
 
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
-                Console.WriteLine("Submitting the job...");
-
                 // submit the job
                 var response = await client.PostAsJsonAsync(BaseUrl + "?api-version=2.0", request);
 
@@ -226,10 +231,8 @@ namespace PocAnomaly
                 }
 
                 string jobId = await response.Content.ReadAsAsync<string>();
-                Console.WriteLine(string.Format("Job ID: {0}", jobId));
 
                 // start the job
-                Console.WriteLine("Starting the job...");
                 response = await client.PostAsync(BaseUrl + "/" + jobId + "/start?api-version=2.0", null);
                 if (!response.IsSuccessStatusCode)
                 {
@@ -241,7 +244,6 @@ namespace PocAnomaly
                 bool done = false;
                 while (!done)
                 {
-                    Console.WriteLine("Checking the job status...");
                     response = await client.GetAsync(jobLocation);
                     if (!response.IsSuccessStatusCode)
                     {
@@ -252,28 +254,15 @@ namespace PocAnomaly
                     if (watch.ElapsedMilliseconds > TimeOutInMilliseconds)
                     {
                         done = true;
-                        Console.WriteLine(string.Format("Timed out. Deleting job {0} ...", jobId));
                         await client.DeleteAsync(jobLocation);
                     }
                     switch (status.StatusCode)
                     {
-                        case BatchScoreStatusCode.NotStarted:
-                            Console.WriteLine(string.Format("Job {0} not yet started...", jobId));
-                            break;
-                        case BatchScoreStatusCode.Running:
-                            Console.WriteLine(string.Format("Job {0} running...", jobId));
-                            break;
                         case BatchScoreStatusCode.Failed:
-                            Console.WriteLine(string.Format("Job {0} failed!", jobId));
-                            Console.WriteLine(string.Format("Error details: {0}", status.Details));
-                            return (response.StatusCode, await response.Content.ReadAsStringAsync());
                         case BatchScoreStatusCode.Cancelled:
-                            Console.WriteLine(string.Format("Job {0} cancelled!", jobId));
                             return (response.StatusCode, await response.Content.ReadAsStringAsync());
                         case BatchScoreStatusCode.Finished:
                             done = true;
-                            Console.WriteLine(string.Format("Job {0} finished!", jobId));
-                            Console.WriteLine("Done ");
                             CloudBlockBlob blob = container.GetBlockBlobReference("output.csv");
                             using (var memoryStream = new MemoryStream())
                             {
@@ -288,7 +277,7 @@ namespace PocAnomaly
                         Thread.Sleep(1000); // Wait one second
                     }
                 }
-                return (HttpStatusCode.OK, "OK");
+                return (done ? HttpStatusCode.OK : HttpStatusCode.RequestTimeout, done ? "OK" : "Timeout");
             }
         }
     }
