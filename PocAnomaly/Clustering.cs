@@ -79,6 +79,28 @@ namespace PocAnomaly
                 distanceToCentroid = 0;
                 anomaly = false;
             }
+
+            public string CSVHeader()
+            {
+                string csv = "";
+                foreach (KeyValuePair<string, string> value in values)
+                {
+                    csv += value.Key + ",";
+                }
+                csv += "anomaly";
+                return csv;
+            }
+            public string CSVLine()
+            {
+                string csv = "";
+                foreach (KeyValuePair<string, string> value in values)
+                {
+                    csv += value.Value + ",";
+                }
+                csv += anomaly ? "true" : "false";
+                return csv;
+            }
+
             public Dictionary<string, string> values { get; set; }
             public double distanceToCentroid { get; set; }
             public bool anomaly { get; set; }
@@ -89,6 +111,26 @@ namespace PocAnomaly
             {
                 clusterId = id;
                 elements = new List<Point> { point };
+            }
+
+            public string CSVHeader()
+            {
+                string csv = "";
+                if (elements.Count > 0)
+                {
+                    csv = elements[0].CSVHeader() + "," + "cluster_id\n";
+                }
+                return csv;
+            }
+
+            public string CSVLines()
+            {
+                string csv = "";
+                foreach (Point element in elements)
+                {
+                    csv += element.CSVLine() + "," + clusterId + "\n";
+                }
+                return csv;
             }
 
             public string clusterId { get; set; }
@@ -162,6 +204,50 @@ namespace PocAnomaly
             return serviceClient.GetContainerReference("mlstudio3");
         }
 
+        static private double distanceAverage(Cluster cluster)
+        {
+            double sum = cluster.elements.Aggregate(new Double(), (acc, point) => acc + point.distanceToCentroid);
+            return sum / (double)cluster.elements.Count;
+        }
+
+        static private double variance(Cluster cluster, double average)
+        {
+            double sum = cluster.elements.Aggregate(new Double(), (acc, point) => acc + Math.Pow(point.distanceToCentroid - average, 2));
+            return sum / (double)cluster.elements.Count;
+        }
+
+        static private double standardDerivation(Cluster cluster, double average)
+        {
+            return Math.Sqrt(variance(cluster, average));
+        }
+
+        static private void foundAnomalies(Cluster cluster)
+        {
+            double average = distanceAverage(cluster);
+            double derivation = standardDerivation(cluster, average);
+
+            foreach (Point point in cluster.elements)
+            {
+                if (point.distanceToCentroid > average + 2 * derivation || point.distanceToCentroid < average - 2 * derivation)
+                {
+                    point.anomaly = true;
+                }
+            };
+        }
+
+        static private string BuildCSV(ref Dictionary<string, Cluster> map)
+        {
+            string csv = "";
+            if (map.Count > 0)
+            {
+                csv = map.ElementAt(0).Value.CSVHeader();
+            }
+            foreach (KeyValuePair<string, Cluster> cluster in map)
+            {
+                csv += cluster.Value.CSVLines();
+            }
+            return csv;
+        }
 
         static private void AnalyzeResult(string text)
         {
@@ -169,20 +255,27 @@ namespace PocAnomaly
             int linesCount = result.Length - 1;
             int pointsCount = 0;
             var map = BuildClusterMap(ref result, ref pointsCount);
+            double average = (double)pointsCount / (double)map.Count;
 
-            foreach (KeyValuePair<string, Cluster> points in map)
+            foreach (KeyValuePair<string, Cluster> cluster in map)
             {
-                Cluster cluster = points.Value;
-                if (((double)cluster.elements.Count / (double)pointsCount) < 0.1)
+                if (((double)cluster.Value.elements.Count / average) < 0.05)
                 {
-                    cluster.anomaly = true;
+                    cluster.Value.anomaly = true;
+                }
+                else
+                {
+                    foundAnomalies(cluster.Value);
                 }
             }
 
             CloudBlobContainer container = GetContainer();
-            CloudBlockBlob inputBlob = container.GetBlockBlobReference("result.json");
+            CloudBlockBlob jsonBlob = container.GetBlockBlobReference("result.json");
             string jsonResult = Newtonsoft.Json.JsonConvert.SerializeObject(map.Select(elem => elem.Value).ToList());
-            inputBlob.UploadText(jsonResult);
+            jsonBlob.UploadText(jsonResult);
+
+            CloudBlockBlob csvBlob = container.GetBlockBlobReference("result.csv");
+            csvBlob.UploadText(BuildCSV(ref map));
         }
 
         [FunctionName("clustering")]
