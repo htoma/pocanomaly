@@ -109,7 +109,7 @@ namespace PocAnomaly
         {
             public Cluster(string id, Point point)
             {
-                clusterId = id;
+                clusterId = "_" + id + "_";
                 elements = new List<Point> { point };
             }
 
@@ -259,7 +259,11 @@ namespace PocAnomaly
 
             foreach (KeyValuePair<string, Cluster> cluster in map)
             {
-                if (((double)cluster.Value.elements.Count / average) < 0.05)
+                if (((double)cluster.Value.elements.Count / average) < 0.1)
+                {
+                    cluster.Value.anomaly = true;
+                }
+                else if (((double)cluster.Value.elements.Count / (double)pointsCount) < 0.05)
                 {
                     cluster.Value.anomaly = true;
                 }
